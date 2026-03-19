@@ -103,16 +103,64 @@ def get_jira_tickets():
     print(f"✅ Found {len(tickets)} ticket(s)")
     return tickets
 
+def _extract_adf_text(node):
+    """
+    Extract visible text from Atlassian Document Format (ADF).
+
+    Jira comment bodies are often stored as ADF JSON; we flatten it so we can
+    reliably detect our own "TCS" marker text near a Google Doc link.
+    """
+    if node is None:
+        return ""
+
+    # Plain strings can exist in some contexts; treat them as text.
+    if isinstance(node, str):
+        return node
+
+    if isinstance(node, list):
+        return "\n".join(_extract_adf_text(item) for item in node if item is not None)
+
+    if not isinstance(node, dict):
+        return str(node)
+
+    parts = []
+    node_type = node.get("type")
+    if node_type == "text":
+        parts.append(node.get("text", ""))
+
+    for child_key in ("content",):
+        child = node.get(child_key)
+        if child:
+            parts.append(_extract_adf_text(child))
+
+    # Paragraph-ish blocks should separate with newlines to preserve ordering cues.
+    if node_type in {"paragraph", "heading", "blockquote", "listItem"}:
+        return "".join(parts).strip()
+
+    return "".join(parts)
+
+
 def ticket_has_google_doc_link(ticket):
-    """Check if ticket already has a Google Doc link in comments"""
-    comments = ticket['fields'].get('comment', {}).get('comments', [])
-    
+    """Check if ticket already has an auto-generated TCS Google Doc link in comments."""
+    comments = ticket["fields"].get("comment", {}).get("comments", [])
+
+    # Only treat as "already done" if the Google Doc link is clearly marked as
+    # auto-generated test cases.
+    marker = "Test cases generated automatically:"
+
     for comment in comments:
-        body = comment.get('body', '')
-        # Check if comment contains a Google Docs link
-        if 'docs.google.com' in str(body):
-            return True
-    
+        body = comment.get("body")
+        text = _extract_adf_text(body)
+
+        # Accept either the exact marker or the legacy marker that included a check emoji.
+        # The key requirement is that the marker text appears before the doc link.
+        legacy_marker = "✅ " + marker
+        if (marker in text or legacy_marker in text) and "docs.google.com/document/d/" in text:
+            marker_pos = text.find(marker) if marker in text else text.find(legacy_marker)
+            link_pos = text.find("docs.google.com/document/d/")
+            if marker_pos != -1 and link_pos != -1 and marker_pos < link_pos:
+                return True
+
     return False
 
 def get_ticket_content(ticket):
@@ -255,7 +303,7 @@ def add_comment_to_jira(ticket_key, doc_url):
                     "content": [
                         {
                             "type": "text",
-                            "text": "✅ Test cases generated automatically: "
+                            "text": "Test cases generated automatically: "
                         },
                         {
                             "type": "text",
