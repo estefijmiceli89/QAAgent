@@ -32,7 +32,7 @@ cd jira-test-case-generator
 ### Step 2: Install Python Dependencies
 
 ```bash
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
 ### Step 3: Set Up Jira API Token
@@ -84,7 +84,7 @@ pip install -r requirements.txt
 - The URL will look like: `https://drive.google.com/drive/folders/FOLDER_ID_HERE`
 - Copy the `FOLDER_ID_HERE` part
 
-## 🎯 Usage
+## 🎯 Usage (Test Case Generator)
 
 Run the script:
 
@@ -149,7 +149,7 @@ Change `status = "Assigned"` to whatever status you want (e.g., `"In Progress"`,
 
 ### "Module not found" error
 ```bash
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
 ### "Invalid credentials" for Jira
@@ -194,7 +194,77 @@ MIT License - feel free to use this for any purpose
 
 Created for QA teams who want to automate test case generation.
 
-## 🆘 Support
+---
+
+## 🐛 Jira BUG Creator (CCAI)
+
+This repository also includes a helper script to quickly create well-structured Jira BUGs in the `CCAI` project from AI-generated text and local evidence.
+
+### 🔧 Prerequisites
+
+- **Python 3.9+**
+- **Jira Cloud** account with permission to create issues, add attachments, and comment in `CCAI`.
+- Jira **API token** (see steps above in the Test Case Generator section for how to create one).
+
+### ⚙️ Configure `.env`
+
+Update `.env.example` and copy it to `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` and set al menos:
+
+```bash
+JIRA_BASE_URL=https://your-domain.atlassian.net
+JIRA_EMAIL=your-email@example.com
+JIRA_API_TOKEN=your_jira_api_token_here
+JIRA_PROJECT_KEY=CCAI
+
+ASSIGNEE_ACCOUNT_ID=paolo_account_id_here        # accountId de Paolo
+REPORTER_ACCOUNT_ID=estefania_account_id_here    # tu accountId
+REPORTER_DISPLAY_NAME=estefania miceli
+CCAI_PRODUCT_FIELD_ID=customfield_XXXXX          # field id de "CCAI Product"
+
+CLAUDE_API_KEY=your_claude_api_key_here          # misma key que usas para TCs
+```
+
+Puedes obtener los `*_ACCOUNT_ID` y el `CCAI_PRODUCT_FIELD_ID` con la API de Jira Cloud
+o pidiéndoselos a tu admin Jira.
+
+### 🚀 Create a Jira BUG en CCAI (100% automático)
+
+Desde la raíz del proyecto:
+
+```bash
+python3 create_bug.py \
+  --summary "Short summary de lo que pasa" \
+  --evidence "/path/to/your/screenshot_or_video" \
+  --url "https://qai-ui.qa.ai.fpscloud.com"   # opcional (si lo omitís usa el default)
+```
+
+El flujo es:
+
+1. Tú solo pasas **short summary** y **ruta a la evidencia**.
+2. El script llama a **Claude** usando `CLAUDE_API_KEY` y genera:
+   - Summary  
+   - URL  
+   - Pre-Conditions  
+   - Description  
+   - Steps to Reproduce  
+   - Current Behaviour  
+   - Expected Behaviour  
+   - Console Logs  
+3. Usa el `summary` como **título del ticket** y el resto en la **Description** (en formato ADF).
+4. Crea un **Bug** en el proyecto `CCAI`.
+5. Setea el campo `CCAI Product` al valor `"Q-AI"` usando `CCAI_PRODUCT_FIELD_ID`.
+6. Asigna el ticket a Paolo (`ASSIGNEE_ACCOUNT_ID`).
+7. Adjunta la evidencia (`--evidence`).
+8. Deja un comentario indicando que el bug fue generado automáticamente y te menciona
+   con `REPORTER_DISPLAY_NAME`.
+
+Al final, imprime por consola la URL del ticket creado.
 
 If you encounter issues:
 1. Check the troubleshooting section above
