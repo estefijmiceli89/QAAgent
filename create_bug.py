@@ -298,6 +298,7 @@ def build_description(bug: Dict[str, str]) -> Dict[str, Any]:
 def create_issue(
     config: Dict[str, str],
     bug: Dict[str, str],
+    parent_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a Jira BUG issue and return the response JSON."""
     url = f"{config['JIRA_BASE_URL'].rstrip('/')}/rest/api/3/issue"
@@ -310,6 +311,9 @@ def create_issue(
         "issuetype": {"name": "Bug"},
         "description": description_adf,
     }
+
+    if parent_key:
+        fields["parent"] = {"key": parent_key}
 
     # Assignee is set separately after CCAI Product is confirmed (see set_ccai_product).
 
@@ -575,6 +579,18 @@ def build_comment_body(config: Dict[str, str]) -> Dict[str, Any]:
     return content
 
 
+def extract_issue_key(parent_arg: str) -> str:
+    """Extract a Jira issue key from a URL or return as-is if already a key."""
+    import re
+    # Match keys like CCAI-494, ABC-123
+    match = re.search(r"([A-Z][A-Z0-9]+-\d+)", parent_arg)
+    if match:
+        return match.group(1)
+    raise ValueError(f"Could not extract a Jira issue key from: {parent_arg}")
+
+
+
+
 def add_comment(
     config: Dict[str, str],
     issue_key: str,
@@ -635,6 +651,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to evidence file (image/video) to attach to the bug.",
         required=False,
     )
+    parser.add_argument(
+        "--parent",
+        "-p",
+        help=(
+            "URL or key of the parent Jira ticket. "
+            "The bug will be linked as child of this ticket. "
+            "Example: https://fpsinc.atlassian.net/browse/CCAI-494 or CCAI-494"
+        ),
+        required=False,
+    )
     return parser.parse_args()
 
 
@@ -652,9 +678,20 @@ def main() -> None:
     # Enforce URL exactly as requested (prevents Claude from inventing a URL).
     bug["url"] = url_value
 
-    # Ensure the summary used by Jira matches the AI-generated summary.
-    issue = create_issue(config, bug)
+    # Resolve parent key before creating the issue.
+    parent_key: Optional[str] = None
+    if args.parent:
+        try:
+            parent_key = extract_issue_key(args.parent)
+            print(f"ℹ️ Parent ticket: {parent_key}")
+        except ValueError as e:
+            print(f"⚠️ {e}")
+
+    issue = create_issue(config, bug, parent_key=parent_key)
     issue_key = issue.get("key")
+
+    if parent_key:
+        print(f"🔗 {issue_key} created as child of {parent_key}")
 
     ccai_set = set_ccai_product(config, issue_key)
     if ccai_set:
