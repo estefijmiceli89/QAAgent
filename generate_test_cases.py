@@ -5,6 +5,7 @@ Automatically generates test cases for Jira tickets using Claude AI
 """
 
 import os
+import re
 import sys
 import requests
 from anthropic import Anthropic
@@ -26,6 +27,12 @@ JIRA_API_TOKEN = os.getenv('JIRA_API_TOKEN')
 JIRA_PROJECT = os.getenv('JIRA_PROJECT')  # e.g., CCAI
 CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY')
 GOOGLE_DRIVE_FOLDER_ID = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
+
+# Test case queue: "Ready for QA" + current user in "Assigned QA" (not main assignee).
+JIRA_TCS_STATUS = (os.getenv('JIRA_TCS_STATUS') or 'Ready for QA').strip()
+JIRA_ASSIGNED_QA_FIELD_ID = (os.getenv('JIRA_ASSIGNED_QA_FIELD_ID') or '').strip()
+JIRA_ASSIGNED_QA_CF = (os.getenv('JIRA_ASSIGNED_QA_CF') or '').strip()
+JIRA_ASSIGNED_QA_FIELD_NAME = (os.getenv('JIRA_ASSIGNED_QA_FIELD_NAME') or 'Assigned QA').strip()
 
 # Google Drive API scope
 SCOPES = ['https://www.googleapis.com/auth/drive.file', 
@@ -68,38 +75,88 @@ def get_google_credentials():
     
     return creds
 
-def get_jira_tickets():
-    """Get assigned Jira tickets in 'Assigned' status"""
-    print("🔍 Searching for assigned tickets...")
+def _assigned_qa_jql_fragment() -> str:
+    """
+    JQL condition: Assigned QA custom field = logged-in Jira user.
 
-    url = f"{JIRA_URL}/rest/api/3/search/jql"
+    Prefer JIRA_ASSIGNED_QA_FIELD_ID=customfield_12345 or JIRA_ASSIGNED_QA_CF=12345
+    (reliable on every site). Otherwise uses JIRA_ASSIGNED_QA_FIELD_NAME in quotes.
+    """
+    if JIRA_ASSIGNED_QA_FIELD_ID:
+        m = re.match(r"^customfield_(\d+)$", JIRA_ASSIGNED_QA_FIELD_ID, re.IGNORECASE)
+        if m:
+            return f"cf[{m.group(1)}] = currentUser()"
+    if JIRA_ASSIGNED_QA_CF.isdigit():
+        return f"cf[{JIRA_ASSIGNED_QA_CF}] = currentUser()"
+    name = JIRA_ASSIGNED_QA_FIELD_NAME.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{name}" = currentUser()'
+
+
+def get_jira_tickets():
+    """
+    Get Jira tickets in 'Ready for QA' with the current user in the Assigned QA field
+    (not the main Jira assignee).
+    """
+    print('🔍 Searching for tickets in "Ready for QA" with you as Assigned QA...')
+
+    # Jira Cloud removed POST /rest/api/3/search (410); use enhanced JQL search.
+    base = (JIRA_URL or "").rstrip("/")
+    url = f"{base}/rest/api/3/search/jql"
 
     auth = (JIRA_EMAIL, JIRA_API_TOKEN)
 
     headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
-    # JQL query to find tickets assigned to current user in "Assigned" status
-    jql = f'project = {JIRA_PROJECT} AND assignee = currentUser() AND status = "Assigned"'
+    status_escaped = JIRA_TCS_STATUS.replace("\\", "\\\\").replace('"', '\\"')
+    jql = (
+        f'project = {JIRA_PROJECT} AND status = "{status_escaped}" AND '
+        f"{_assigned_qa_jql_fragment()}"
+    )
+
+    field_ids = [
+        'summary',
+        'description',
+        'status',
+        'assignee',
+        'comment',
+    ]
+    if JIRA_ASSIGNED_QA_FIELD_ID and re.match(
+        r"^customfield_\d+$", JIRA_ASSIGNED_QA_FIELD_ID, re.IGNORECASE
+    ):
+        field_ids.append(JIRA_ASSIGNED_QA_FIELD_ID)
 
     payload = {
         'jql': jql,
-        'fields': ['summary', 'description', 'status', 'assignee', 'comment'],
+        'fields': field_ids,
         'maxResults': 50
     }
 
-    response = requests.post(url, auth=auth, headers=headers, json=payload)
-    
+    response = requests.post(
+        url,
+        auth=auth,
+        headers={**headers, "x-atlassian-force-account-id": "true"},
+        json=payload,
+        timeout=60,
+    )
+
     if response.status_code != 200:
         print(f"❌ Error fetching Jira tickets: {response.status_code}")
+        print(f"ℹ️ JQL was: {jql}")
         print(response.text)
         return []
     
     data = response.json()
-    tickets = data.get('issues', [])
-    
+    raw_issues = data.get("issues")
+    if isinstance(raw_issues, list):
+        tickets = raw_issues
+    elif isinstance(raw_issues, dict) and isinstance(raw_issues.get("nodes"), list):
+        tickets = raw_issues["nodes"]
+    else:
+        tickets = []
+
     print(f"✅ Found {len(tickets)} ticket(s)")
     return tickets
 
@@ -166,7 +223,15 @@ def ticket_has_google_doc_link(ticket):
 def get_ticket_content(ticket):
     """Extract relevant content from Jira ticket"""
     fields = ticket['fields']
-    
+
+    assigned_qa = 'N/A'
+    if JIRA_ASSIGNED_QA_FIELD_ID and JIRA_ASSIGNED_QA_FIELD_ID in fields:
+        raw = fields.get(JIRA_ASSIGNED_QA_FIELD_ID)
+        if isinstance(raw, dict):
+            assigned_qa = raw.get('displayName') or raw.get('emailAddress') or str(raw)
+        elif raw is not None:
+            assigned_qa = str(raw)
+
     content = f"""
 # {ticket['key']}: {fields.get('summary', 'No title')}
 
@@ -178,6 +243,9 @@ def get_ticket_content(ticket):
 
 ## Assignee
 {fields.get('assignee', {}).get('displayName', 'Unassigned')}
+
+## Assigned QA
+{assigned_qa}
 """
     
     return content

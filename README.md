@@ -4,7 +4,7 @@ Automatically generate comprehensive test cases for Jira tickets using Claude AI
 
 ## ✨ Features
 
-- 🔍 Automatically finds tickets assigned to you in "Assigned" status
+- 🔍 Finds tickets in **Ready for QA** with **you** in the **Assigned QA** field
 - 🤖 Uses Claude AI to generate comprehensive test cases
 - 📄 Creates Google Docs with proper formatting
 - 💬 Adds comments to Jira tickets with links to test case documents
@@ -75,6 +75,9 @@ python3 -m pip install -r requirements.txt
    JIRA_EMAIL=your-email@example.com
    JIRA_API_TOKEN=your_jira_api_token_here
    JIRA_PROJECT=CCAI
+   JIRA_TCS_STATUS=Ready for QA
+   # Set the custom field id for "Assigned QA" (Jira: issue > … > field id) — best for JQL:
+   JIRA_ASSIGNED_QA_FIELD_ID=customfield_12345
    CLAUDE_API_KEY=your_claude_api_key_here
    GOOGLE_DRIVE_FOLDER_ID=1MazY7ZEo6_WUIunO7TJ4e2ZtAqT7UX9y
    ```
@@ -89,12 +92,12 @@ python3 -m pip install -r requirements.txt
 Run the script:
 
 ```bash
-python generate_test_cases.py
+python3 generate_test_cases.py
 ```
 
 ### What happens:
 
-1. ✅ The script connects to Jira and searches for tickets assigned to you in "Assigned" status
+1. ✅ The script searches Jira for tickets in **Ready for QA** with **currentUser()** in **Assigned QA**
 2. 🔍 For each ticket, it checks if there's already a Google Doc link in the comments
 3. 🤖 If no link exists, it generates test cases using Claude AI
 4. 📄 Creates a Google Doc with the ticket ID as the name
@@ -136,14 +139,14 @@ Edit line 126 in `generate_test_cases.py`:
 model="claude-sonnet-4-20250514",  # Change to claude-opus-4-5-20251101 for better quality
 ```
 
-### Filter Different Ticket Statuses
+### Queue and Assigned QA (JQL)
 
-Edit line 95 in `generate_test_cases.py`:
-```python
-jql = f'project = {JIRA_PROJECT} AND assignee = currentUser() AND status = "Assigned"'
-```
+The default query is: `status = "Ready for QA"` and the **Assigned QA** custom field = `currentUser()`.
 
-Change `status = "Assigned"` to whatever status you want (e.g., `"In Progress"`, `"To Do"`).
+- **`JIRA_TCS_STATUS`**: name of the status column (default: `Ready for QA`).
+- **`JIRA_ASSIGNED_QA_FIELD_ID`**: e.g. `customfield_12345` (recommended; find it in Jira field config or the browser network tab).
+- Alternatively: **`JIRA_ASSIGNED_QA_CF`** = numeric id only, e.g. `12345` (builds `cf[12345] = currentUser()`).
+- If you omit the id, the script uses **`JIRA_ASSIGNED_QA_FIELD_NAME`** (default `Assigned QA`) in JQL; the name must match your Jira field label exactly.
 
 ## ⚠️ Troubleshooting
 
