@@ -258,7 +258,6 @@ El flujo es:
    - Steps to Reproduce  
    - Current Behaviour  
    - Expected Behaviour  
-   - Console Logs  
 3. Usa el `summary` como **título del ticket** y el resto en la **Description** (en formato ADF).
 4. Crea un **Bug** en el proyecto `CCAI`.
 5. Setea el campo `CCAI Product` al valor `"Q-AI"` usando `CCAI_PRODUCT_FIELD_ID`.
