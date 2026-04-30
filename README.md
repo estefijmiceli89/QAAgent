@@ -116,6 +116,7 @@ The first time you run the script, it will:
 ```
 jira-test-case-generator/
 ├── generate_test_cases.py    # Main script
+├── revise_test_cases_doc.py  # Apply feedback to an existing Google Doc of TCs
 ├── prompt_maestro.txt         # Test case generation template
 ├── requirements.txt           # Python dependencies
 ├── .env.example              # Configuration template
@@ -127,6 +128,21 @@ jira-test-case-generator/
 ```
 
 ## 🔧 Customization
+
+### Revisar un Doc de casos de prueba (retroalimentación con IA)
+
+Después de revisar el Google Doc generado, podés pedir cambios en lenguaje natural con un script aparte (misma `CLAUDE_API_KEY` y `token.json` que el generador):
+
+```bash
+python3 revise_test_cases_doc.py \
+  --url "https://docs.google.com/document/d/TU_DOC_ID/edit" \
+  --feedback "Eliminá TC-05 por duplicado. Agregá un escenario negativo para sesión expirada. Mejorá los Given del TC-02."
+```
+
+- **`--feedback-file ruta.txt`**: instrucciones largas desde un archivo UTF-8.
+- **`--dry-run`**: imprime el texto revisado en la consola sin tocar el Doc.
+
+El script lee el documento, envía el contenido + tus instrucciones a Claude y reemplaza el cuerpo del Doc con la versión completa revisada.
 
 ### Modify the Prompt Template
 
