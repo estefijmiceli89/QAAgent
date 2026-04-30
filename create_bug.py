@@ -10,7 +10,11 @@ This script:
 """
 
 import argparse
+import base64
+import mimetypes
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -63,6 +67,149 @@ def _mime_type_for_path(path: Path) -> Optional[str]:
     if suffix in {".gif"}:
         return "image/gif"
     return None
+
+
+def _video_mime_type(path: Path) -> Optional[str]:
+    """MIME type for video evidence (Claude gets frames; Jira still receives the original file)."""
+    suffix = path.suffix.lower()
+    if suffix == ".mp4":
+        return "video/mp4"
+    if suffix == ".webm":
+        return "video/webm"
+    if suffix in {".mov", ".m4v"}:
+        return "video/quicktime"
+    return None
+
+
+def _attachment_content_type(path: Path) -> str:
+    """Content-Type for Jira multipart upload (helps avoid 415 / broken uploads for video)."""
+    return (
+        _mime_type_for_path(path)
+        or _video_mime_type(path)
+        or mimetypes.guess_type(path.name)[0]
+        or "application/octet-stream"
+    )
+
+
+def _ffmpeg_available() -> bool:
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+def _video_duration_seconds(path: Path) -> float:
+    r = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "").strip() or "ffprobe failed")
+    return max(0.1, float((r.stdout or "0").strip() or 0))
+
+
+def _extract_video_key_frame_jpegs(path: Path, num_frames: int = 6) -> List[bytes]:
+    """
+    Sample evenly spaced JPEG frames for vision models (Claude has no raw MP4 input).
+    """
+    duration = _video_duration_seconds(path)
+    out: List[bytes] = []
+    for i in range(1, num_frames + 1):
+        t = duration * i / (num_frames + 1)
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            str(t),
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=1280:-1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-",
+        ]
+        r = subprocess.run(cmd, capture_output=True, timeout=180)
+        if r.returncode == 0 and r.stdout:
+            out.append(r.stdout)
+    if not out:
+        raise RuntimeError("No se pudieron extraer fotogramas del vídeo (ffmpeg).")
+    return out
+
+
+def _evidence_blocks_for_claude(evidence_path: Path) -> List[Dict[str, Any]]:
+    """Build multimodal user content blocks (images and/or video-as-frames) before the text prompt."""
+    blocks: List[Dict[str, Any]] = []
+    if not evidence_path.exists():
+        return blocks
+
+    image_mime = _mime_type_for_path(evidence_path)
+    if image_mime:
+        data_b64 = base64.b64encode(evidence_path.read_bytes()).decode("utf-8")
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_mime,
+                    "data": data_b64,
+                },
+            }
+        )
+        return blocks
+
+    if _video_mime_type(evidence_path):
+        if not _ffmpeg_available():
+            print(
+                "⚠️ ffmpeg/ffprobe no está en PATH: el MP4 se adjuntará a Jira, "
+                "pero Claude no podrá ver el vídeo (instala ffmpeg o usa capturas PNG/JPEG)."
+            )
+            return blocks
+        try:
+            frames = _extract_video_key_frame_jpegs(evidence_path)
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "Las siguientes imágenes son fotogramas tomados a intervalos regulares "
+                        "de una grabación de pantalla (archivo de vídeo). "
+                        "Úsalos junto con el resumen del bug para describir la UI, el error "
+                        "visible y el flujo."
+                    ),
+                }
+            )
+            for jpeg_bytes in frames:
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": base64.b64encode(jpeg_bytes).decode("utf-8"),
+                        },
+                    }
+                )
+        except Exception as e:
+            print(f"⚠️ No se pudo leer el vídeo para la IA: {e}")
+        return blocks
+
+    return blocks
 
 
 def resolve_assignee_account_id(config: Dict[str, str]) -> Optional[str]:
@@ -213,7 +360,9 @@ def generate_bug_with_claude(
         "- Prefer problem + where/when (component, screen, or action), not vague text.\n"
         "- Keep it under 100 characters; Jira allows up to ~255 but short titles work better.\n"
         "- No trailing period; no markdown; no leading \"Bug:\" or ticket prefixes.\n"
-        "- Match the language of the user's short summary (Spanish or English)."
+        "- Match the language of the user's short summary (Spanish or English).\n\n"
+        "If the user attached images or video frames, ground your description, steps, "
+        "and current vs expected behaviour in what is visibly shown."
     )
 
     user_prompt = (
@@ -223,33 +372,15 @@ def generate_bug_with_claude(
 
     try:
         content_blocks: List[Dict[str, Any]] = []
-        mime_type = None
-        if evidence_path and evidence_path.exists():
-            mime_type = _mime_type_for_path(evidence_path)
-
-        # Send image evidence to Claude (skip non-images like video).
-        if mime_type:
-            import base64
-
-            image_bytes = evidence_path.read_bytes()
-            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-            content_blocks.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": image_b64,
-                    },
-                }
-            )
+        if evidence_path:
+            content_blocks.extend(_evidence_blocks_for_claude(evidence_path))
 
         content_blocks.append({"type": "text", "text": user_prompt})
 
         message = client.messages.create(
             # Use the same model you already use for test cases
             model="claude-sonnet-4-20250514",
-            max_tokens=1000,
+            max_tokens=1200,
             system=system_prompt,
             messages=[
                 {
@@ -564,33 +695,84 @@ def attach_file(
     config: Dict[str, str],
     issue_key: str,
     file_path: Path,
-) -> None:
-    """Attach a local file to the given Jira issue."""
-    if not file_path.exists():
-        print(f"⚠️ Evidence file not found, skipping attachment: {file_path}")
-        return
+) -> bool:
+    """
+    POST multipart attachment to Jira Cloud (/rest/api/3/issue/{key}/attachments).
+
+    Uses explicit Content-Type, Accept: application/json, longer timeouts for MP4s,
+    and a few retries on transient errors.
+    """
+    path = file_path.expanduser().resolve()
+    if not path.is_file():
+        print(f"❌ Archivo de evidencia no encontrado: {path}")
+        return False
 
     url = (
         f"{config['JIRA_BASE_URL'].rstrip('/')}/rest/api/3/issue/"
         f"{issue_key}/attachments"
     )
     auth = (config["JIRA_EMAIL"], config["JIRA_API_TOKEN"])
+    content_type = _attachment_content_type(path)
+    size = path.stat().st_size
+    # Screen recordings need more than 60s; cap at 15 minutes.
+    timeout = max(120, min(900, 60 + size // (200 * 1024)))
 
     headers = {
         "X-Atlassian-Token": "no-check",
+        "Accept": "application/json",
+        "x-atlassian-force-account-id": "true",
     }
 
-    with file_path.open("rb") as f:
-        files = {"file": (file_path.name, f)}
-        response = requests.post(
-            url, auth=auth, headers=headers, files=files, timeout=60
-        )
+    last_status: Optional[int] = None
+    last_body = ""
 
-    if response.status_code not in (200, 201):
-        print(f"⚠️ Failed to upload attachment: {response.status_code}")
-        print(response.text)
-    else:
-        print(f"📎 Attached evidence file: {file_path.name}")
+    for attempt in range(1, 4):
+        try:
+            with path.open("rb") as fh:
+                files = {"file": (path.name, fh, content_type)}
+                response = requests.post(
+                    url,
+                    auth=auth,
+                    headers=headers,
+                    files=files,
+                    timeout=timeout,
+                )
+        except requests.RequestException as exc:
+            last_status = None
+            last_body = str(exc)
+            print(f"⚠️ Error al subir adjunto (intento {attempt}/3): {exc}")
+            time.sleep(2 * attempt)
+            continue
+
+        last_status = response.status_code
+        last_body = response.text or ""
+
+        if response.status_code in (200, 201):
+            try:
+                data = response.json()
+            except ValueError:
+                print(f"❌ Respuesta de adjunto no es JSON: {last_body[:600]}")
+                return False
+            if not isinstance(data, list) or not data:
+                print(f"❌ Jira no devolvió el adjunto en la respuesta: {last_body[:600]}")
+                return False
+            name = data[0].get("filename") or path.name
+            print(f"📎 Adjuntado en Jira: {name} ({size:,} bytes)")
+            return True
+
+        if response.status_code in (429, 503) and attempt < 3:
+            print(f"⚠️ Adjunto rechazado ({response.status_code}), reintentando…")
+            time.sleep(3 * attempt)
+            continue
+
+        break
+
+    err = f"❌ No se pudo adjuntar la evidencia"
+    if last_status is not None:
+        err += f" (HTTP {last_status})"
+    err += f": {last_body[:1000]}"
+    print(err)
+    return False
 
 
 def build_comment_body(config: Dict[str, str]) -> Dict[str, Any]:
@@ -733,9 +915,17 @@ def main() -> None:
     default_url = "https://qai-ui.qa.ai.fpscloud.com"
     url_value = args.url.strip() if args.url else default_url
 
-    # 1) Use AI to generate the full bug content from the short summary.
-    evidence_path = Path(args.evidence) if args.evidence else None
-    bug = generate_bug_with_claude(config, args.summary, evidence_path, url_value)
+    optional_evidence: Optional[Path] = None
+    if args.evidence:
+        optional_evidence = Path(args.evidence).expanduser().resolve()
+        if not optional_evidence.is_file():
+            print(f"❌ Archivo de evidencia no encontrado: {optional_evidence}")
+            sys.exit(1)
+
+    # 1) IA primero: genera el cuerpo del bug a partir del resumen + evidencia (imagen o fotogramas del vídeo).
+    bug = generate_bug_with_claude(
+        config, args.summary, optional_evidence, url_value
+    )
 
     # Enforce URL exactly as requested (prevents Claude from inventing a URL).
     bug["url"] = url_value
@@ -751,6 +941,9 @@ def main() -> None:
 
     issue = create_issue(config, bug, parent_key=parent_key)
     issue_key = issue.get("key")
+    if not issue_key:
+        print("❌ Jira no devolvió la clave del ticket; no se puede adjuntar evidencia.")
+        sys.exit(1)
 
     if parent_key:
         print(f"🔗 {issue_key} created as child of {parent_key}")
@@ -761,8 +954,10 @@ def main() -> None:
     else:
         print(f"⚠️ Skipping Paolo assignment — CCAI Product not set on {issue_key}")
 
-    if args.evidence:
-        attach_file(config, issue_key, evidence_path)
+    # 2) Después: adjuntar el archivo original (p. ej. MP4 completo) en el ticket.
+    if optional_evidence is not None:
+        if not attach_file(config, issue_key, optional_evidence):
+            sys.exit(1)
 
     add_comment(config, issue_key)
 

@@ -1,0 +1,3 @@
+python3 revise_test_cases_doc.py \
+  --url "https://docs.google.com/document/d/1-EAauTF6k9B4DNjU-YF0dEgR5-eza2inA_PFyHL2Ico/edit?tab=t.0" \
+  --feedback "Agrega tc que cree agente nuevo sin supervisor, otro que cree agente nuevo con supervisor SIN manager, otro que cree agente nuevo co supervisor CON Manager, otro que cree un supervisor sin manager y lo asigne a agente y otro que cree supervisor con manager y lo asigne a agente . Renumerá los TCs."
